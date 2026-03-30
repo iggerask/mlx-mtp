@@ -301,8 +301,6 @@ Sometimes the best optimization is noticing that the answer already exists insid
 
 ## Glossary
 
-Terms are marked with anchors throughout the text for expandable card rendering.
-
 <span id="term-memory-bandwidth">**Memory Bandwidth**</span>: The rate at which data can be read from (or written to) memory, measured in GB/s. During LLM decode, the GPU must read the model's weight matrices from memory for every token generated. The M4 Pro has 273 GB/s of bandwidth (48GB unified memory). When the GPU can compute faster than it can read data, the workload is "memory-bandwidth bound" — the bottleneck is data transfer, not arithmetic. This is the case for single-token LLM decode on virtually all current hardware.
 
 <span id="term-speculative-decoding">**Speculative Decoding**</span>: A technique to generate multiple tokens per model forward pass. A cheap "drafter" quickly predicts the next token(s), then the full model verifies those predictions in a single batched forward pass. Correct predictions are accepted for free (the model already computed them during verification); incorrect ones are replaced with the model's own predictions. The net effect is more tokens per unit of compute, at the cost of occasionally wasting work on wrong drafts.
