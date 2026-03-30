@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-mlx-mtp"
+version = "0.2.0"
+description = "MTP Speculative Decoding for vllm-mlx on Apple Silicon"
+requires-python = ">=3.10"
+dependencies = [
+    "mlx>=0.30",
+    "mlx-lm>=0.30",
+    "huggingface_hub",
+    "safetensors",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-timeout",
+]
+# Install fused MoE kernels: pip install -e ".[fused]"
+fused = [
+    "mlx_fused_moe @ file:mlx_fused_moe",
+]
+
+[tool.setuptools.packages.find]
+include = ["vllm_mlx_mtp*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+timeout = 300

@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+*.so
+*.dylib
+*.metallib
+*.gputrace/
+*.log
+.claude/
+mtp_weights/

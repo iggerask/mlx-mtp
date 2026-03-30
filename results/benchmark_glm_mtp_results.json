@@ -1,0 +1,98 @@
+[
+  {
+    "category": "code",
+    "prompt_idx": 0,
+    "baseline_tok_s": 56.4,
+    "mtp_bf16_tok_s": 52.3,
+    "mtp_bf16_x": 0.93,
+    "mtp_bf16_accept": 0.57,
+    "mtp_q4_tok_s": 53.5,
+    "mtp_q4_x": 0.95,
+    "mtp_q4_accept": 0.51,
+    "tokens": 128
+  },
+  {
+    "category": "code",
+    "prompt_idx": 1,
+    "baseline_tok_s": 56.3,
+    "mtp_bf16_tok_s": 52.4,
+    "mtp_bf16_x": 0.93,
+    "mtp_bf16_accept": 0.65,
+    "mtp_q4_tok_s": 52.3,
+    "mtp_q4_x": 0.93,
+    "mtp_q4_accept": 0.6,
+    "tokens": 128
+  },
+  {
+    "category": "prose",
+    "prompt_idx": 0,
+    "baseline_tok_s": 55.4,
+    "mtp_bf16_tok_s": 52.9,
+    "mtp_bf16_x": 0.95,
+    "mtp_bf16_accept": 0.46,
+    "mtp_q4_tok_s": 53.2,
+    "mtp_q4_x": 0.96,
+    "mtp_q4_accept": 0.44,
+    "tokens": 128
+  },
+  {
+    "category": "prose",
+    "prompt_idx": 1,
+    "baseline_tok_s": 56.0,
+    "mtp_bf16_tok_s": 52.6,
+    "mtp_bf16_x": 0.94,
+    "mtp_bf16_accept": 0.59,
+    "mtp_q4_tok_s": 54.7,
+    "mtp_q4_x": 0.98,
+    "mtp_q4_accept": 0.59,
+    "tokens": 128
+  },
+  {
+    "category": "short",
+    "prompt_idx": 0,
+    "baseline_tok_s": 57.3,
+    "mtp_bf16_tok_s": 54.3,
+    "mtp_bf16_x": 0.95,
+    "mtp_bf16_accept": 0.59,
+    "mtp_q4_tok_s": 54.8,
+    "mtp_q4_x": 0.96,
+    "mtp_q4_accept": 0.51,
+    "tokens": 128
+  },
+  {
+    "category": "short",
+    "prompt_idx": 1,
+    "baseline_tok_s": 57.2,
+    "mtp_bf16_tok_s": 53.7,
+    "mtp_bf16_x": 0.94,
+    "mtp_bf16_accept": 0.51,
+    "mtp_q4_tok_s": 54.7,
+    "mtp_q4_x": 0.96,
+    "mtp_q4_accept": 0.58,
+    "tokens": 128
+  },
+  {
+    "category": "summarization",
+    "prompt_idx": 0,
+    "baseline_tok_s": 56.8,
+    "mtp_bf16_tok_s": 53.4,
+    "mtp_bf16_x": 0.94,
+    "mtp_bf16_accept": 0.61,
+    "mtp_q4_tok_s": 54.5,
+    "mtp_q4_x": 0.96,
+    "mtp_q4_accept": 0.59,
+    "tokens": 128
+  },
+  {
+    "category": "summarization",
+    "prompt_idx": 1,
+    "baseline_tok_s": 57.2,
+    "mtp_bf16_tok_s": 54.0,
+    "mtp_bf16_x": 0.94,
+    "mtp_bf16_accept": 0.63,
+    "mtp_q4_tok_s": 54.9,
+    "mtp_q4_x": 0.96,
+    "mtp_q4_accept": 0.55,
+    "tokens": 128
+  }
+]

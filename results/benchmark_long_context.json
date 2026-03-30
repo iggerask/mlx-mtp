@@ -1,0 +1,202 @@
+[
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "baseline",
+    "context_length": 527,
+    "tokens": 64,
+    "tok_s": 52.7,
+    "prefill_s": 1.04,
+    "acceptance": 0,
+    "memory_mb": 16896.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "baseline",
+    "context_length": 2063,
+    "tokens": 64,
+    "tok_s": 45.9,
+    "prefill_s": 4.21,
+    "acceptance": 0,
+    "memory_mb": 16980.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "baseline",
+    "context_length": 4111,
+    "tokens": 64,
+    "tok_s": 41.5,
+    "prefill_s": 10.09,
+    "acceptance": 0,
+    "memory_mb": 17090.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "baseline",
+    "context_length": 8207,
+    "tokens": 64,
+    "tok_s": 34.4,
+    "prefill_s": 27.45,
+    "acceptance": 0,
+    "memory_mb": 17312.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "baseline",
+    "context_length": 16399,
+    "tokens": 64,
+    "tok_s": 10.3,
+    "prefill_s": 90.96,
+    "acceptance": 0,
+    "memory_mb": 17756.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "mtp_bf16",
+    "context_length": 527,
+    "tokens": 64,
+    "tok_s": 48.6,
+    "prefill_s": 1.31,
+    "acceptance": 0.66,
+    "memory_mb": 18546.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "mtp_bf16",
+    "context_length": 2063,
+    "tokens": 64,
+    "tok_s": 42.0,
+    "prefill_s": 4.3,
+    "acceptance": 0.66,
+    "memory_mb": 18629.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "mtp_bf16",
+    "context_length": 4111,
+    "tokens": 64,
+    "tok_s": 37.9,
+    "prefill_s": 10.34,
+    "acceptance": 0.57,
+    "memory_mb": 18740.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "mtp_bf16",
+    "context_length": 8207,
+    "tokens": 64,
+    "tok_s": 26.2,
+    "prefill_s": 28.67,
+    "acceptance": 0.49,
+    "memory_mb": 18962.0
+  },
+  {
+    "model": "GLM-4.7-Flash",
+    "method": "mtp_bf16",
+    "context_length": 16399,
+    "tokens": 64,
+    "tok_s": 8.0,
+    "prefill_s": 91.17,
+    "acceptance": 0.43,
+    "memory_mb": 19405.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "baseline",
+    "context_length": 533,
+    "tokens": 64,
+    "tok_s": 74.8,
+    "prefill_s": 0.9,
+    "acceptance": 0,
+    "memory_mb": 19551.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "baseline",
+    "context_length": 2069,
+    "tokens": 64,
+    "tok_s": 61.9,
+    "prefill_s": 3.09,
+    "acceptance": 0,
+    "memory_mb": 19583.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "baseline",
+    "context_length": 4117,
+    "tokens": 64,
+    "tok_s": 59.4,
+    "prefill_s": 6.38,
+    "acceptance": 0,
+    "memory_mb": 19625.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "baseline",
+    "context_length": 8213,
+    "tokens": 64,
+    "tok_s": 52.0,
+    "prefill_s": 13.7,
+    "acceptance": 0,
+    "memory_mb": 19709.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "baseline",
+    "context_length": 16405,
+    "tokens": 64,
+    "tok_s": 40.8,
+    "prefill_s": 33.05,
+    "acceptance": 0,
+    "memory_mb": 19877.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "mtp_bf16",
+    "context_length": 533,
+    "tokens": 64,
+    "tok_s": 69.5,
+    "prefill_s": 0.89,
+    "acceptance": 0.75,
+    "memory_mb": 21715.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "mtp_bf16",
+    "context_length": 2069,
+    "tokens": 64,
+    "tok_s": 56.2,
+    "prefill_s": 3.09,
+    "acceptance": 0.78,
+    "memory_mb": 21747.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "mtp_bf16",
+    "context_length": 4117,
+    "tokens": 64,
+    "tok_s": 53.9,
+    "prefill_s": 6.36,
+    "acceptance": 0.83,
+    "memory_mb": 21789.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "mtp_bf16",
+    "context_length": 8213,
+    "tokens": 64,
+    "tok_s": 51.7,
+    "prefill_s": 13.76,
+    "acceptance": 0.83,
+    "memory_mb": 21873.0
+  },
+  {
+    "model": "Qwen3.5-35B-A3B",
+    "method": "mtp_bf16",
+    "context_length": 16405,
+    "tokens": 64,
+    "tok_s": 16.1,
+    "prefill_s": 34.05,
+    "acceptance": 0.78,
+    "memory_mb": 22041.0
+  }
+]

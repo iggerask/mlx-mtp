@@ -1,0 +1,167 @@
+[
+  {
+    "strategy": "baseline",
+    "prompt_idx": 0,
+    "tokens_generated": 128,
+    "prefill_ms": 78.0589579953812,
+    "decode_ms": 1708.5594170494005,
+    "decode_tok_s": 74.33162624178611,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Write a Python function that implements binary search:\\n```py"
+  },
+  {
+    "strategy": "compile_moe_mlp",
+    "prompt_idx": 0,
+    "tokens_generated": 128,
+    "prefill_ms": 79.28374997572973,
+    "decode_ms": 1678.5810830187984,
+    "decode_tok_s": 75.65913930806387,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Write a Python function that implements binary search:\\n```py"
+  },
+  {
+    "strategy": "compile_norm_mlp",
+    "prompt_idx": 0,
+    "tokens_generated": 128,
+    "prefill_ms": 78.2669159816578,
+    "decode_ms": 1716.7755840346217,
+    "decode_tok_s": 73.9758889752703,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Write a Python function that implements binary search:\\n```py"
+  },
+  {
+    "strategy": "compile_moe_routing",
+    "prompt_idx": 0,
+    "tokens_generated": 128,
+    "prefill_ms": 78.44379200832918,
+    "decode_ms": 1703.402624989394,
+    "decode_tok_s": 74.55665392131866,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Write a Python function that implements binary search:\\n```py"
+  },
+  {
+    "strategy": "compile_full_step",
+    "prompt_idx": 0,
+    "tokens_generated": 0,
+    "prefill_ms": 0,
+    "decode_ms": 0,
+    "decode_tok_s": 0,
+    "first_token_match": false,
+    "all_match": false,
+    "prompt_preview": "FAILED: [compile] Function arguments must be trees of arrays or constants (floats, ints, strings, or None), but received type mlx_lm.models.cache.ArraysCache."
+  },
+  {
+    "strategy": "baseline",
+    "prompt_idx": 1,
+    "tokens_generated": 128,
+    "prefill_ms": 58.08916699606925,
+    "decode_ms": 1706.7001659888774,
+    "decode_tok_s": 74.41260189156603,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Explain the theory of relativity in simple terms:\\n"
+  },
+  {
+    "strategy": "compile_moe_mlp",
+    "prompt_idx": 1,
+    "tokens_generated": 128,
+    "prefill_ms": 61.753083020448685,
+    "decode_ms": 1674.6582499472424,
+    "decode_tok_s": 75.83636840770404,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Explain the theory of relativity in simple terms:\\n"
+  },
+  {
+    "strategy": "compile_norm_mlp",
+    "prompt_idx": 1,
+    "tokens_generated": 128,
+    "prefill_ms": 58.083749958314,
+    "decode_ms": 1711.2733750254847,
+    "decode_tok_s": 74.21374156429488,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Explain the theory of relativity in simple terms:\\n"
+  },
+  {
+    "strategy": "compile_moe_routing",
+    "prompt_idx": 1,
+    "tokens_generated": 128,
+    "prefill_ms": 61.55900005251169,
+    "decode_ms": 1722.263582982123,
+    "decode_tok_s": 73.74016454560211,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "Explain the theory of relativity in simple terms:\\n"
+  },
+  {
+    "strategy": "compile_full_step",
+    "prompt_idx": 1,
+    "tokens_generated": 0,
+    "prefill_ms": 0,
+    "decode_ms": 0,
+    "decode_tok_s": 0,
+    "first_token_match": false,
+    "all_match": false,
+    "prompt_preview": "FAILED: [compile] Function arguments must be trees of arrays or constants (floats, ints, strings, or None), but received type mlx_lm.models.cache.ArraysCache."
+  },
+  {
+    "strategy": "baseline",
+    "prompt_idx": 2,
+    "tokens_generated": 128,
+    "prefill_ms": 33.36162498453632,
+    "decode_ms": 1711.8159160017967,
+    "decode_tok_s": 74.19022034602155,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "The capital of France is"
+  },
+  {
+    "strategy": "compile_moe_mlp",
+    "prompt_idx": 2,
+    "tokens_generated": 128,
+    "prefill_ms": 38.0393749801442,
+    "decode_ms": 1715.2970409952104,
+    "decode_tok_s": 74.03965433667102,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "The capital of France is"
+  },
+  {
+    "strategy": "compile_norm_mlp",
+    "prompt_idx": 2,
+    "tokens_generated": 128,
+    "prefill_ms": 33.49437500583008,
+    "decode_ms": 1742.823957989458,
+    "decode_tok_s": 72.87023994466354,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "The capital of France is"
+  },
+  {
+    "strategy": "compile_moe_routing",
+    "prompt_idx": 2,
+    "tokens_generated": 128,
+    "prefill_ms": 33.53445901302621,
+    "decode_ms": 1736.090750026051,
+    "decode_tok_s": 73.15285793562019,
+    "first_token_match": true,
+    "all_match": true,
+    "prompt_preview": "The capital of France is"
+  },
+  {
+    "strategy": "compile_full_step",
+    "prompt_idx": 2,
+    "tokens_generated": 0,
+    "prefill_ms": 0,
+    "decode_ms": 0,
+    "decode_tok_s": 0,
+    "first_token_match": false,
+    "all_match": false,
+    "prompt_preview": "FAILED: [compile] Function arguments must be trees of arrays or constants (floats, ints, strings, or None), but received type mlx_lm.models.cache.ArraysCache."
+  }
+]
