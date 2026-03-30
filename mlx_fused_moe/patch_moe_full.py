@@ -93,8 +93,38 @@ def _make_fused_moe_call(original_call):
         # y: (n_tokens, hidden_size) — already reduced across experts!
         y = y.reshape(*batch_shape, hidden_size)
 
-        # --- Shared expert (unchanged) ---
-        shared_y = self.shared_expert(x)
+        # --- Shared expert (fused: gate+up+SwiGLU → down+reduce) ---
+        se = self.shared_expert
+        se_gate_proj = se.gate_proj
+        se_up_proj = se.up_proj
+        se_down_proj = se.down_proj
+
+        # Reshape 2D weights to 3D (1 expert) for gather kernels
+        se_gw = se_gate_proj["weight"][None]
+        se_gs = se_gate_proj["scales"][None]
+        se_gb = se_gate_proj.get("biases")
+        se_gb = mx.zeros_like(se_gate_proj["scales"])[None] if se_gb is None else se_gb[None]
+        se_uw = se_up_proj["weight"][None]
+        se_us = se_up_proj["scales"][None]
+        se_ub = se_up_proj.get("biases")
+        se_ub = mx.zeros_like(se_up_proj["scales"])[None] if se_ub is None else se_ub[None]
+        se_dw = se_down_proj["weight"][None]
+        se_ds = se_down_proj["scales"][None]
+        se_db = se_down_proj.get("biases")
+        se_db = mx.zeros_like(se_down_proj["scales"])[None] if se_db is None else se_db[None]
+
+        se_idx = mx.zeros(n_tokens, dtype=mx.int32)
+        se_scores = mx.ones((n_tokens, 1), dtype=se_gs.dtype)
+
+        se_intermediate = gather_qmm_swiglu(
+            x_flat, se_gw, se_gs, se_gb, se_uw, se_us, se_ub, se_idx,
+            top_k=1, group_size=se_gate_proj.group_size, bits=se_gate_proj.bits,
+        )
+        shared_y = gather_qmm_down_reduce(
+            se_intermediate, se_dw, se_ds, se_db, se_idx, se_scores,
+            top_k=1, group_size=se_down_proj.group_size, bits=se_down_proj.bits,
+        )
+        shared_y = shared_y.reshape(*batch_shape, hidden_size)
         shared_y = mx.sigmoid(self.shared_expert_gate(x)) * shared_y
 
         y = y + shared_y

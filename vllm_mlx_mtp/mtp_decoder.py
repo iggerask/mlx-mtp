@@ -29,6 +29,13 @@ from .mtp_head import MTPHead
 
 logger = logging.getLogger(__name__)
 
+# Try to import Cython fast loop
+try:
+    from ._fast_loop import generate_k1_zr as _cy_generate_k1_zr
+    _HAS_CYTHON = True
+except ImportError:
+    _HAS_CYTHON = False
+
 
 @dataclass
 class MTPConfig:
@@ -67,6 +74,11 @@ class MTPConfig:
     quantize_head: bool = False
     quantize_head_bits: int = 4
     quantize_head_group_size: int = 64
+    # Top-K cached draft: instead of running the full 248K LM head for drafting,
+    # use the top-K candidates from the previous step's verify logits. This
+    # replaces the ~1.2ms LM head matmul with a tiny K-element projection.
+    # Set to 0 to disable. 512 covers ~100% of drafts empirically.
+    draft_top_k: int = 0
 
 
 @dataclass
@@ -180,6 +192,24 @@ class MTPDecoder:
             self._gdn_capture = GDNStateCapture(model)
             self._gdn_capture.patch()
 
+        # Top-K cached draft state
+        self._draft_top_k = self.config.draft_top_k
+        self._cached_top_k_indices = None  # (K,) int32 array of candidate token IDs
+        self._cached_sub_weights = None    # (K, hidden_size) f16 — pre-sliced LM head
+        if self._draft_top_k > 0:
+            # Pre-dequantize the FULL LM head to f16 for fast sub-matrix slicing.
+            # ~2GB memory but eliminates the 0.1ms Q4 indexing overhead per step.
+            head = self._text_model.lm_head
+            self._lm_head_f16 = mx.dequantize(
+                head["weight"], head["scales"], head["biases"],
+                head.group_size, head.bits,
+            )
+            mx.eval(self._lm_head_f16)
+            logger.info(
+                "Pre-dequantized LM head to f16: %.1f MB",
+                self._lm_head_f16.nbytes / 1e6,
+            )
+
         # Optionally quantize MTP head for faster drafting (~30% overhead reduction)
         if self.config.quantize_head:
             from .optimizations import quantize_mtp_head
@@ -196,6 +226,26 @@ class MTPDecoder:
             return mx.argmax(logits, axis=-1)
         else:
             return mx.random.categorical(logits / temperature)
+
+    def _draft_from_candidates(self, mtp_h: mx.array, temperature: float = 0.0) -> mx.array:
+        """Draft using cached top-K candidates with pre-sliced f16 weights.
+
+        Uses a cached (K, hidden_size) f16 sub-matrix for near-zero-cost matmul.
+        """
+        indices = self._cached_top_k_indices  # (K,)
+        sub_W = self._cached_sub_weights       # (K, hidden_size) f16
+        h_flat = mtp_h.reshape(-1, mtp_h.shape[-1])
+        sub_logits = h_flat @ sub_W.T  # (1, K)
+        best_idx = mx.argmax(sub_logits, axis=-1)
+        return indices[best_idx]
+
+    def _update_top_k_candidates(self, logits_for_next: mx.array):
+        """Update cached top-K candidates and pre-slice f16 weight sub-matrix."""
+        K = self._draft_top_k
+        flat = logits_for_next.reshape(-1)
+        self._cached_top_k_indices = mx.argpartition(-flat, kth=K)[:K]
+        # Pre-slice the f16 LM head for the new candidate set
+        self._cached_sub_weights = self._lm_head_f16[self._cached_top_k_indices]
 
     def _draft_tokens(
         self,
@@ -364,8 +414,14 @@ class MTPDecoder:
         if tok_embed.ndim == 2:
             tok_embed = tok_embed[:, None, :]
         mtp_h = self.mtp_head(last_hidden, tok_embed)
-        mtp_logits = self._lm_head(mtp_h)
-        draft_token = self._sample(mtp_logits[:, -1, :], temperature)
+
+        if self._draft_top_k > 0 and self._cached_top_k_indices is not None:
+            # Fast path: project against cached top-K candidates only
+            draft_token = self._draft_from_candidates(mtp_h, temperature)
+        else:
+            # Full LM head projection (first step or top-K disabled)
+            mtp_logits = self._lm_head(mtp_h)
+            draft_token = self._sample(mtp_logits[:, -1, :], temperature)
 
         self.stats.draft_attempts += 1
 
@@ -387,8 +443,14 @@ class MTPDecoder:
         # Sample verified token from position 0 (what model predicts after token_0)
         verified_token = self._sample(verify_logits[:, 0, :], temperature)
 
-        # Evaluate entire graph at once, including GDN intermediates
-        eval_args = [draft_token, verified_token, verify_logits, verify_hidden]
+        # Speculatively sample bonus token from position 1 (used on ACCEPT, discarded on REJECT)
+        bonus_token = self._sample(verify_logits[:, 1, :], temperature)
+
+        # Evaluate entire graph at once, including GDN intermediates + bonus
+        eval_args = [draft_token, verified_token, bonus_token, verify_hidden]
+        if self._draft_top_k > 0:
+            # Need verify_logits materialized to update top-K candidates
+            eval_args.append(verify_logits)
         if zr:
             eval_args.extend(self._gdn_capture.get_intermediates())
             self._gdn_capture.disable()
@@ -400,8 +462,9 @@ class MTPDecoder:
         if draft_id in eos_tokens:
             self.stats.total_tokens += 1
             self.stats.record_draft_result(False)
+            if self._draft_top_k > 0:
+                self._update_top_k_candidates(verify_logits[:, 0, :])
             if zr:
-                # Restore to post-token_0 state, trim KV by 1 (drop draft)
                 self._gdn_capture.restore(cache, position=0, n_kv_trim=1)
                 return [verified_id], verified_token.reshape(1), verify_hidden[:, 0:1, :]
             else:
@@ -412,11 +475,12 @@ class MTPDecoder:
                 return [verified_id], verified_token.reshape(1), fallback_hidden[:, -1:, :]
 
         if verified_id == draft_id:
-            # ACCEPT: cache contains both tokens, get bonus from position 1
+            # ACCEPT
             self.stats.draft_accepted += 1
             self.stats.record_draft_result(True)
-            bonus_token = self._sample(verify_logits[:, 1, :], temperature)
-            mx.eval(bonus_token)
+            if self._draft_top_k > 0:
+                # Position 1 logits predict what comes after bonus
+                self._update_top_k_candidates(verify_logits[:, 1, :])
 
             accepted = [draft_id, bonus_token.item()]
             self.stats.total_tokens += 2
@@ -425,9 +489,11 @@ class MTPDecoder:
             # REJECT
             self.stats.record_draft_result(False)
             self.stats.total_tokens += 1
+            if self._draft_top_k > 0:
+                # Position 0 logits predict what comes after verified
+                self._update_top_k_candidates(verify_logits[:, 0, :])
 
             if zr:
-                # Restore GDN to post-token_0 (exact), trim KV by 1
                 self._gdn_capture.restore(cache, position=0, n_kv_trim=1)
                 return [verified_id], verified_token.reshape(1), verify_hidden[:, 0:1, :]
             else:
@@ -477,8 +543,10 @@ class MTPDecoder:
         verify_hidden = self._capture.get_hidden_state()
 
         verified1 = self._sample(verify_logits[:, 0, :], temperature)
+        # Speculatively sample verified2 from position 1 (used if draft1 accepted)
+        verified2 = self._sample(verify_logits[:, 1, :], temperature)
 
-        eval_args = [draft1, draft2, verified1, verify_logits, verify_hidden]
+        eval_args = [draft1, draft2, verified1, verified2, verify_logits, verify_hidden]
         if zr:
             eval_args.extend(self._gdn_capture.get_intermediates())
             self._gdn_capture.disable()
@@ -504,12 +572,10 @@ class MTPDecoder:
                 mx.eval(fb, fbh)
                 return [v1], verified1.reshape(1), fbh[:, -1:, :]
 
-        # Draft1 ACCEPTED — check draft2 from position 1 (FREE!)
+        # Draft1 ACCEPTED — check draft2 from position 1 (already sampled above)
         self.stats.draft_accepted += 1
         self.stats.record_draft_result(True)
 
-        verified2 = self._sample(verify_logits[:, 1, :], temperature)
-        mx.eval(verified2)
         v2 = verified2.item()
 
         if d2 not in eos_tokens and v2 == d2:
@@ -574,51 +640,40 @@ class MTPDecoder:
         verify_logits = self.model(verify_input, cache=cache)
         verify_hidden = self._capture.get_hidden_state()
 
-        verified0 = self._sample(verify_logits[:, 0, :], temperature)
+        # Pre-sample ALL positions (0..K) in one lazy graph to avoid per-position evals
+        verified = [self._sample(verify_logits[:, i, :], temperature) for i in range(K + 1)]
 
-        eval_args = [verified0, verify_logits, verify_hidden] + list(drafts)
+        eval_args = verified + [verify_hidden] + list(drafts)
         if zr:
             eval_args.extend(self._gdn_capture.get_intermediates())
             self._gdn_capture.disable()
         mx.eval(*eval_args)
 
         draft_ids = [d.item() for d in drafts]
-        v0 = verified0.item()
+        verified_ids = [v.item() for v in verified]
 
-        # Verify each draft position sequentially
+        # Verify each draft position
         accepted = []
         for i in range(K):
             did = draft_ids[i]
 
             if did in eos_tokens:
-                # EOS in draft — stop here
                 for _ in range(i, K):
                     self.stats.record_draft_result(False)
                 break
 
-            if i == 0:
-                verified_id = v0
-            else:
-                vi = self._sample(verify_logits[:, i, :], temperature)
-                mx.eval(vi)
-                verified_id = vi.item()
-
-            if verified_id == did:
-                # Draft i accepted
+            if verified_ids[i] == did:
                 self.stats.draft_accepted += 1
                 self.stats.record_draft_result(True)
                 accepted.append(did)
             else:
-                # Draft i rejected — accept corrected token, stop
                 for _ in range(i, K):
                     self.stats.record_draft_result(False)
-                accepted.append(verified_id)
+                accepted.append(verified_ids[i])
                 break
         else:
-            # All K drafts accepted — get bonus from position K
-            bonus = self._sample(verify_logits[:, K, :], temperature)
-            mx.eval(bonus)
-            accepted.append(bonus.item())
+            # All K drafts accepted — bonus is position K (already sampled)
+            accepted.append(verified_ids[K])
 
         n_accepted = len(accepted)
         self.stats.total_tokens += n_accepted
@@ -748,17 +803,16 @@ class MTPDecoder:
         )
         verify_logits = self.model(verify_input, cache=cache)
         verify_hidden = self._capture.get_hidden_state()
-        mx.eval(verify_logits, verify_hidden)
 
         verified_token = self._sample(verify_logits[:, 0, :], temperature)
-        mx.eval(verified_token)
+        bonus_token = self._sample(verify_logits[:, 1, :], temperature)
+        mx.eval(verify_logits, verify_hidden, verified_token, bonus_token)
+
         verified_id = verified_token.item()
 
         if verified_id == draft_id:
             # ACCEPT
             self.stats.draft_accepted += 1
-            bonus_token = self._sample(verify_logits[:, 1, :], temperature)
-            mx.eval(bonus_token)
 
             accepted = [draft_id, bonus_token.item()]
             self.stats.total_tokens += 2
@@ -813,6 +867,10 @@ class MTPDecoder:
         yield token_0.item()
         self.stats.total_tokens += 1
 
+        # Initialize top-K candidates from prefill logits
+        if self._draft_top_k > 0:
+            self._update_top_k_candidates(logits[:, -1, :])
+
         last_hidden = hidden[:, -1:, :]
         current_token = token_0.reshape(1)
         generated = 1
@@ -842,6 +900,177 @@ class MTPDecoder:
             last_hidden = next_hidden
 
         self.stats.total_time = time.perf_counter() - start_time
+
+    def generate_fast(
+        self,
+        prompt_tokens: mx.array,
+        cache: list,
+        max_tokens: int = 256,
+        temperature: float = 0.0,
+        eos_tokens: Optional[Set[int]] = None,
+    ) -> Generator[int, None, None]:
+        """Fast-path generate: Cython K=1 ZR loop or inlined Python fallback.
+
+        Requires: lazy_draft=True, batch_verify=True, zero_replay=True, K=1 (or adaptive).
+        Falls back to generate() if conditions aren't met.
+        """
+        cfg = self.config
+        if not (cfg.batch_verify and cfg.lazy_draft and cfg.zero_replay):
+            yield from self.generate(prompt_tokens, cache, max_tokens, temperature, eos_tokens)
+            return
+
+        eos_tokens = eos_tokens or set()
+
+        # Cython fast path
+        if _HAS_CYTHON:
+            base_k = cfg.num_speculative_tokens
+            use_adaptive = cfg.adaptive_k and base_k >= 2
+            if base_k > 1 and not use_adaptive:
+                yield from self.generate(prompt_tokens, cache, max_tokens, temperature, eos_tokens)
+                return
+
+            self.stats = MTPStats(_rolling_window=cfg.adaptive_k_window)
+            yield from _cy_generate_k1_zr(
+                self.model,
+                self.mtp_head,
+                self._capture,
+                self._gdn_capture,
+                self._embed_tokens,
+                self._lm_head,
+                prompt_tokens,
+                cache,
+                max_tokens,
+                temperature,
+                eos_tokens,
+                self.stats,
+                use_adaptive,
+                cfg.adaptive_k_threshold,
+                self._step_lazy_batch_kn,
+                # Top-K cached f16 draft
+                draft_top_k=self._draft_top_k,
+                lm_head_f16=getattr(self, '_lm_head_f16', None),
+                update_topk_fn=self._update_top_k_candidates if self._draft_top_k > 0 else None,
+                draft_from_fn=self._draft_from_candidates if self._draft_top_k > 0 else None,
+                get_topk_indices_fn=(lambda: self._cached_top_k_indices) if self._draft_top_k > 0 else None,
+            )
+            return
+        stats = MTPStats(_rolling_window=cfg.adaptive_k_window)
+        self.stats = stats
+        start_time = time.perf_counter()
+
+        model = self.model
+        mtp_head = self.mtp_head
+        capture = self._capture
+        gdn_cap = self._gdn_capture
+        embed_fn = self._embed_tokens
+        lm_head_fn = self._lm_head
+        sample = self._sample
+
+        # Adaptive K state
+        base_k = cfg.num_speculative_tokens
+        use_adaptive = cfg.adaptive_k and base_k >= 2
+        adaptive_threshold = cfg.adaptive_k_threshold
+        # For non-adaptive K>1, fall back to generic generate
+        if base_k > 1 and not use_adaptive:
+            yield from self.generate(prompt_tokens, cache, max_tokens, temperature, eos_tokens)
+            return
+
+        # Prefill
+        logits = model(prompt_tokens[None], cache=cache)
+        hidden = capture.get_hidden_state()
+        mx.eval(logits, hidden, *[c.state for c in cache if hasattr(c, "state")])
+        stats.prefill_time = time.perf_counter() - start_time
+
+        # First token
+        tok = sample(logits[:, -1, :], temperature)
+        mx.eval(tok)
+        tid = tok.item()
+        yield tid
+        stats.total_tokens += 1
+        if tid in eos_tokens:
+            stats.total_time = time.perf_counter() - start_time
+            return
+
+        last_hidden = hidden[:, -1:, :]
+        cur_tok = tok.reshape(1)
+        generated = 1
+
+        # Main decode loop — inlined K=1 ZR path
+        while generated < max_tokens:
+            stats.total_steps += 1
+
+            # Check if adaptive K=2 should kick in
+            if use_adaptive and stats.rolling_acceptance >= adaptive_threshold:
+                # Fall back to generic K=2 path
+                stats.k2_steps += 1
+                accepted, cur_tok, last_hidden = self._step_lazy_batch_kn(
+                    cache, cur_tok, last_hidden, temperature, eos_tokens, 2,
+                )
+            else:
+                # Inlined K=1 ZR path — no method dispatch overhead
+                stats.k1_steps += 1
+                stats.draft_attempts += 1
+
+                # Build lazy draft graph
+                tok_embed = embed_fn(cur_tok[None])
+                if tok_embed.ndim == 2:
+                    tok_embed = tok_embed[:, None, :]
+                mtp_h = mtp_head(last_hidden, tok_embed)
+                mtp_logits = lm_head_fn(mtp_h)
+                draft = sample(mtp_logits[:, -1, :], temperature)
+
+                # Build verify graph with GDN capture
+                gdn_cap.prepare(cache)
+                verify_input = mx.concatenate(
+                    [cur_tok.reshape(1, 1), draft.reshape(1, 1)], axis=1
+                )
+                verify_logits = model(verify_input, cache=cache)
+                verify_hidden = capture.get_hidden_state()
+                verified = sample(verify_logits[:, 0, :], temperature)
+                bonus = sample(verify_logits[:, 1, :], temperature)
+
+                # Single eval
+                ims = gdn_cap.get_intermediates()
+                gdn_cap.disable()
+                mx.eval(draft, verified, bonus, verify_hidden, *ims)
+
+                draft_id = draft.item()
+                verified_id = verified.item()
+
+                if draft_id in eos_tokens:
+                    stats.total_tokens += 1
+                    stats.record_draft_result(False)
+                    gdn_cap.restore(cache, position=0, n_kv_trim=1)
+                    accepted = [verified_id]
+                    cur_tok = verified.reshape(1)
+                    last_hidden = verify_hidden[:, 0:1, :]
+                elif verified_id == draft_id:
+                    # ACCEPT
+                    stats.draft_accepted += 1
+                    stats.record_draft_result(True)
+                    stats.total_tokens += 2
+                    accepted = [draft_id, bonus.item()]
+                    cur_tok = bonus.reshape(1)
+                    last_hidden = verify_hidden[:, 1:2, :]
+                else:
+                    # REJECT
+                    stats.record_draft_result(False)
+                    stats.total_tokens += 1
+                    gdn_cap.restore(cache, position=0, n_kv_trim=1)
+                    accepted = [verified_id]
+                    cur_tok = verified.reshape(1)
+                    last_hidden = verify_hidden[:, 0:1, :]
+
+            for tid in accepted:
+                if generated >= max_tokens:
+                    break
+                yield tid
+                generated += 1
+                if tid in eos_tokens:
+                    stats.total_time = time.perf_counter() - start_time
+                    return
+
+        stats.total_time = time.perf_counter() - start_time
 
     def cleanup(self):
         """Restore model to original state."""

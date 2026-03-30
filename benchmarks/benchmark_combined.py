@@ -28,14 +28,15 @@ from vllm_mlx_mtp.hidden_capture import HiddenStateCapture
 from vllm_mlx_mtp.mtp_decoder import MTPConfig, MTPDecoder, MTPStats
 from vllm_mlx_mtp.mtp_head import build_mtp_head, load_mtp_weights_from_file
 from vllm_mlx_mtp.optimizations import quantize_mtp_head
-from mlx_fused_moe.patch import patch_model, unpatch_model
 from mlx_fused_moe.patch_moe_full import patch_moe_full, unpatch_moe_full
+from mlx_fused_moe.patch_prefill import patch_last_tok_head, unpatch_last_tok_head
+from mlx_fused_moe.patch_fused_proj import patch_fused_proj, unpatch_fused_proj
 
 MODEL_NAME = "mlx-community/Qwen3.5-35B-A3B-4bit"
 BF16_SOURCE = "Qwen/Qwen3.5-35B-A3B"
 MTP_WEIGHTS = Path("mtp_weights/Qwen_Qwen3.5-35B-A3B.safetensors")
 MAX_TOKENS = 200
-NUM_RUNS = 3
+NUM_RUNS = 5
 
 PROMPTS = {
     "code": "Write a Python function that implements merge sort with type hints:\n```python\ndef merge_sort(arr: list[int]) -> list[int]:\n",
@@ -88,7 +89,8 @@ def generate_baseline(model, prompt_arr, max_tokens, eos_set):
 # ---------------------------------------------------------------------------
 
 def generate_mtp(model, mtp_head, prompt_arr, max_tokens, eos_set, k=1,
-                  cascade=False, adaptive=False, threshold=0.90, zero_replay=False):
+                  cascade=False, adaptive=False, threshold=0.90, zero_replay=False,
+                  draft_top_k=0):
     cfg = MTPConfig(
         num_speculative_tokens=k,
         batch_verify=True,
@@ -97,11 +99,13 @@ def generate_mtp(model, mtp_head, prompt_arr, max_tokens, eos_set, k=1,
         adaptive_k=adaptive,
         adaptive_k_threshold=threshold,
         zero_replay=zero_replay,
+        draft_top_k=draft_top_k,
     )
     dec = MTPDecoder(model, mtp_head, cfg)
     cache = make_prompt_cache(model)
     t0 = time.perf_counter()
-    tokens = list(dec.generate(
+    gen_fn = dec.generate_fast if (zero_replay and k <= 2) else dec.generate
+    tokens = list(gen_fn(
         prompt_arr, cache, max_tokens=max_tokens, temperature=0.0, eos_tokens=eos_set,
     ))
     t_total = time.perf_counter() - t0
@@ -176,24 +180,28 @@ def main():
 
     results = []
 
-    # (name, moe_mode, mtp_kwargs)
+    # (name, moe_mode, fused_proj, last_tok, mtp_kwargs)
     # moe_mode: None, "full"
+    # fused_proj: bool — fuse GDN input projections
+    # last_tok: bool — apply last-token LM head for prefill
     # mtp_kwargs: None or dict passed to generate_mtp
     configs = [
-        ("baseline",       None,   None),
-        ("all_k1",         "full", dict(k=1)),
-        ("all_zr_k1",      "full", dict(k=1, zero_replay=True)),
-        ("all_zr_k2",      "full", dict(k=2, zero_replay=True)),
-        ("all_zr_k3",      "full", dict(k=3, zero_replay=True)),
+        ("baseline",       None,   False, False, None),
+        ("all_zr_k1",      "full", False, False, dict(k=1, zero_replay=True)),
+        ("topk_1024",      "full", False, False, dict(k=1, zero_replay=True, draft_top_k=1024)),
+        ("topk_768",       "full", False, False, dict(k=1, zero_replay=True, draft_top_k=768)),
+        ("topk_1024_a95",  "full", False, False, dict(k=2, zero_replay=True, adaptive=True, threshold=0.95, draft_top_k=1024)),
     ]
 
     current_moe = None  # tracks active MoE patch
+    current_lt = False   # tracks last-tok patch
+    current_fp = False   # tracks fused-proj patch
 
     for cat, prompt in PROMPTS.items():
         prompt_arr = mx.array(tokenizer.encode(prompt))
         print(f"--- {cat} ---")
 
-        for name, moe_mode, mtp_kwargs in configs:
+        for name, moe_mode, fused_proj, last_tok, mtp_kwargs in configs:
             # Patch/unpatch MoE kernels
             if moe_mode != current_moe:
                 if current_moe == "full":
@@ -201,6 +209,22 @@ def main():
                 if moe_mode == "full":
                     patch_moe_full(model, verbose=False)
                 current_moe = moe_mode
+
+            # Patch/unpatch fused projections
+            if fused_proj != current_fp:
+                if current_fp:
+                    unpatch_fused_proj()
+                if fused_proj:
+                    patch_fused_proj(model, verbose=False)
+                current_fp = fused_proj
+
+            # Patch/unpatch last-tok LM head
+            if last_tok != current_lt:
+                if current_lt:
+                    unpatch_last_tok_head()
+                if last_tok:
+                    patch_last_tok_head(model, verbose=False)
+                current_lt = last_tok
 
             if mtp_kwargs is not None:
                 fn = lambda p=prompt_arr, kw=mtp_kwargs: generate_mtp(
@@ -217,7 +241,13 @@ def main():
         # Unpatch after each category to start clean
         if current_moe == "full":
             unpatch_moe_full(model)
+        if current_fp:
+            unpatch_fused_proj()
+        if current_lt:
+            unpatch_last_tok_head()
         current_moe = None
+        current_fp = False
+        current_lt = False
         print()
 
     # Summary

@@ -24,6 +24,7 @@ mlx_build_metallib(
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels/gather_qmm_swiglu.metal
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels/fused_qmv.metal
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels/gather_qmm_down_reduce.metal
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/grouped_gemm_swiglu.metal
 )
 
 # Build Python extension module

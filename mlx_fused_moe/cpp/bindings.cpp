@@ -68,4 +68,21 @@ NB_MODULE(_ext, m) {
       "bits"_a = 4,
       "stream"_a = nb::none(),
       "Fused gather_qmm down_proj + score-weighted reduce for MoE decode.");
+
+  m.def(
+      "grouped_gemm_swiglu",
+      &mlx_fused_moe::grouped_gemm_swiglu,
+      "x"_a,
+      "gate_weight"_a,
+      "gate_scales"_a,
+      "gate_biases"_a,
+      "up_weight"_a,
+      "up_scales"_a,
+      "up_biases"_a,
+      "expert_indices"_a,
+      "token_indices"_a,
+      "group_size"_a = 64,
+      "bits"_a = 4,
+      "stream"_a = nb::none(),
+      "Grouped GEMM with fused SwiGLU for MoE prefill.");
 }

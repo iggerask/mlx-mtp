@@ -284,4 +284,101 @@ void GatherQMMDownReduce::eval_gpu(
   enc.dispatch_threadgroups(grid, group);
 }
 
+// ---- GroupedGEMMSwiGLU ----
+
+array grouped_gemm_swiglu(
+    const array& x,
+    const array& gate_weight,
+    const array& gate_scales,
+    const array& gate_biases,
+    const array& up_weight,
+    const array& up_scales,
+    const array& up_biases,
+    const array& expert_indices,
+    const array& token_indices,
+    int group_size,
+    int bits,
+    StreamOrDevice s) {
+  auto stream = to_stream(s);
+  int n_pairs = expert_indices.size();
+  int output_dim = gate_scales.shape(1);
+
+  auto out = array(
+      {n_pairs, output_dim},
+      gate_scales.dtype(),
+      std::make_shared<GroupedGEMMSwiGLU>(stream, group_size, bits, get_metallib_path()),
+      {x, gate_weight, gate_scales, gate_biases,
+       up_weight, up_scales, up_biases,
+       expert_indices, token_indices});
+  return out;
+}
+
+void GroupedGEMMSwiGLU::eval_cpu(
+    const std::vector<array>& inputs,
+    array& out) {
+  throw std::runtime_error("GroupedGEMMSwiGLU only supports GPU");
+}
+
+void GroupedGEMMSwiGLU::eval_gpu(
+    const std::vector<array>& inputs,
+    array& out) {
+  auto& s = stream();
+  auto& d = metal::device(s.device);
+
+  out.set_data(allocator::malloc(out.nbytes()));
+
+  auto& x = inputs[0];
+  auto& gate_weight = inputs[1];
+  auto& gate_scales = inputs[2];
+  auto& gate_biases = inputs[3];
+  auto& up_weight = inputs[4];
+  auto& up_scales = inputs[5];
+  auto& up_biases = inputs[6];
+  auto& expert_indices = inputs[7];
+  auto& token_indices = inputs[8];
+
+  int output_dim = gate_scales.shape(1);
+  int n_experts = gate_weight.shape(0);
+  int packed_input_dim = gate_weight.shape(2);
+  int input_dim = packed_input_dim * (32 / bits_);
+  int n_pairs = expert_indices.size();
+
+  auto lib = d.get_library("mlx_fused_moe", metallib_path_);
+
+  std::string kernel_name;
+  if (gate_scales.dtype() == bfloat16) {
+    kernel_name = "grouped_gemm_swiglu_bf16";
+  } else {
+    kernel_name = "grouped_gemm_swiglu_f16";
+  }
+  auto kernel = d.get_kernel(kernel_name, lib);
+
+  auto& enc = d.get_command_encoder(s.index);
+  enc.set_compute_pipeline_state(kernel);
+
+  enc.set_input_array(x, 0);
+  enc.set_input_array(gate_weight, 1);
+  enc.set_input_array(gate_scales, 2);
+  enc.set_input_array(gate_biases, 3);
+  enc.set_input_array(up_weight, 4);
+  enc.set_input_array(up_scales, 5);
+  enc.set_input_array(up_biases, 6);
+  enc.set_input_array(expert_indices, 7);
+  enc.set_input_array(token_indices, 8);
+  enc.set_output_array(out, 9);
+
+  enc.set_bytes(input_dim, 10);
+  enc.set_bytes(output_dim, 11);
+  enc.set_bytes(group_size_, 12);
+  enc.set_bytes(n_experts, 13);
+  enc.set_bytes(n_pairs, 14);
+
+  // Grid: (n_pairs, ceil(output_dim/8), 1)
+  int rows_per_tg = 8;
+  int n_tg_y = (output_dim + rows_per_tg - 1) / rows_per_tg;
+  auto grid = MTL::Size(n_pairs, n_tg_y, 1);
+  auto group = MTL::Size(64, 1, 1);
+  enc.dispatch_threadgroups(grid, group);
+}
+
 }  // namespace mlx_fused_moe

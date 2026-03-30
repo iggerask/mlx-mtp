@@ -152,4 +152,53 @@ class GatherQMMDownReduce : public mlx::core::UnaryPrimitive {
   std::string metallib_path_;
 };
 
+/**
+ * Grouped GEMM with fused SwiGLU for MoE prefill.
+ *
+ * Processes all token-expert pairs in a single Metal dispatch.
+ * Takes pre-computed token_indices (which original token each pair maps to)
+ * and expert_indices (which expert).
+ *
+ * Output: (n_pairs, output_dim) with SiLU(gate)*up applied.
+ */
+mlx::core::array grouped_gemm_swiglu(
+    const mlx::core::array& x,
+    const mlx::core::array& gate_weight,
+    const mlx::core::array& gate_scales,
+    const mlx::core::array& gate_biases,
+    const mlx::core::array& up_weight,
+    const mlx::core::array& up_scales,
+    const mlx::core::array& up_biases,
+    const mlx::core::array& expert_indices,
+    const mlx::core::array& token_indices,
+    int group_size = 64,
+    int bits = 4,
+    mlx::core::StreamOrDevice s = {});
+
+class GroupedGEMMSwiGLU : public mlx::core::UnaryPrimitive {
+ public:
+  explicit GroupedGEMMSwiGLU(
+      mlx::core::Stream stream, int group_size, int bits,
+      std::string metallib_path = "")
+      : UnaryPrimitive(stream),
+        group_size_(group_size),
+        bits_(bits),
+        metallib_path_(std::move(metallib_path)) {}
+
+  void eval_cpu(
+      const std::vector<mlx::core::array>& inputs,
+      mlx::core::array& out) override;
+  void eval_gpu(
+      const std::vector<mlx::core::array>& inputs,
+      mlx::core::array& out) override;
+
+  DEFINE_NAME(GroupedGEMMSwiGLU)
+  DEFINE_DEFAULT_IS_EQUIVALENT()
+
+ private:
+  int group_size_;
+  int bits_;
+  std::string metallib_path_;
+};
+
 }  // namespace mlx_fused_moe

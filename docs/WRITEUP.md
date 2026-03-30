@@ -1,4 +1,4 @@
-# Squeezing 27% More Speed from an LLM on Apple Silicon
+# Squeezing 38% More Speed from an LLM on Apple Silicon
 
 *What worked, what didn't, and why most optimization intuitions are wrong when you're memory-bandwidth bound.*
 
@@ -6,7 +6,7 @@
 
 [`Qwen3.5-35B-A3B-4bit`](https://huggingface.co/mlx-community/Qwen3.5-35B-A3B-4bit) decodes at 73 tokens per second on an M4 Pro (48GB). That's already fast — Apple Silicon's unified memory architecture and MLX's lazy evaluation make it competitive with much more expensive setups. But 73 t/s is also only 28% of the chip's theoretical [memory bandwidth](#term-memory-bandwidth). There's a 3.7x gap between what the hardware can do and what the software delivers. Surely some of that is recoverable.
 
-This is the story of trying to close that gap. We got 27% — from 73 to 90 t/s — through a combination of [speculative decoding](#term-speculative-decoding), custom [Metal SIMD kernels](#term-simd), and an architectural trick that exploits the internal structure of the model's hybrid attention-recurrent layers. Along the way, we tried a dozen approaches that failed, and each failure taught us something about why inference optimization on Apple Silicon is fundamentally different from what works on CUDA.
+This is the story of trying to close that gap. We got 38% — from 73 to 101 t/s — through a combination of [speculative decoding](#term-speculative-decoding), custom [Metal SIMD kernels](#term-simd), an architectural trick that exploits the internal structure of the model's hybrid attention-recurrent layers, and a targeted draft optimization that eliminates the most expensive operation in the speculative loop. Along the way, we tried a dozen approaches that failed, and each failure taught us something about why inference optimization on Apple Silicon is fundamentally different from what works on CUDA.
 
 ## The Model
 
@@ -252,48 +252,118 @@ intermediate_conv = concat(
 
 Before adding conv restoration, quality was significantly degraded — divergence within 16 tokens on some prompts. The conv window is only 4 tokens wide, but even this small corruption was enough to throw off the subsequent QKV projections. After restoring both recurrent and conv state, the remaining numerical difference vs the standard replay path is only from how Metal tiles its quantized matrix multiplies differently for batch-of-2 vs two batch-of-1 calls. This is a [floating-point non-associativity](#term-fp-nonassoc) artifact, not state corruption. Zero-replay produces bit-identical output when run twice with the same input.
 
+## From Split Calls to a Capture Kernel
+
+The split Metal approach worked — 1.27x — but had unnecessary overhead. Making T separate Metal kernel dispatches per GDN layer per verify step meant 30 layers × 1 extra dispatch = 30 additional dispatches every step. Each dispatch costs ~50 microseconds, adding ~1.5ms of fixed overhead to every verify, whether the draft is accepted or rejected.
+
+The proper solution was to modify the Metal kernel itself. Instead of calling the kernel T times with 1-token slices, we modified the kernel to process all T tokens in a single dispatch while outputting the intermediate recurrent state after each position. The kernel writes the state to an output buffer at each timestep, so the caller can pick any intermediate snapshot without additional GPU round-trips.
+
+This eliminated the per-token dispatch overhead entirely while preserving exact intermediate capture for zero-replay rollback. The net improvement was modest in isolation (~0.5ms per step), but it compounded with the other optimizations.
+
+## Profiling the Remaining Gap
+
+At 90+ t/s (1.27x baseline), we were still far from the theoretical bandwidth ceiling. Where was the remaining time going?
+
+Detailed profiling broke down a single K=1 zero-replay decode step:
+
+| Component | Time | Notes |
+|---|---|---|
+| `model()` graph construction | 1.7ms | Python C API calls into MLX |
+| GPU execution (backbone + LM head) | ~16.9ms | Bandwidth-bound weight loading |
+| Cache restore on reject | 0.12ms | Negligible |
+| **Total step** | **~18.2ms** | |
+
+The 1.7ms Python overhead was surprising. It's not Python bytecode interpretation — it's the cost of crossing the Python-C boundary to construct the [computation graph](#term-computation-graph). Each MLX operation call (`mx.matmul`, `mx.add`, etc.) invokes a C API function that allocates graph nodes, resolves shapes, and registers dependencies. A single `model()` call triggers ~15 such crossings at ~50-100 microseconds each.
+
+### The Cython Detour
+
+Since Python overhead was 1.7ms per step, we tried compiling the inner decode loop in [Cython](https://cython.org/) — C-typed loop counters, local variable caching for `mx.eval` and `mx.argmax`, inlined method dispatch. The idea was to shave microseconds off every Python operation in the hot loop.
+
+Result: no measurable improvement.
+
+The bottleneck isn't Python bytecode (which Cython optimizes) but Python C API calls into MLX (which Cython can't bypass). When the Cython code calls `model(input, cache=cache)`, it still invokes the same Python-level `__call__` method, which triggers the same C API overhead for graph construction. Cython makes the code *between* MLX calls faster, but that code was already negligible — the time is spent *inside* MLX calls.
+
+This definitively ruled out Python-level optimization. The remaining gains had to come from reducing GPU work.
+
+## The Top-K Cached f16 Draft
+
+The MTP drafting pipeline had a hidden cost: the full [LM head](#term-lm-head) projection. After the MTP head produces a draft hidden state, that state must be projected through the 248K-vocab LM head — a 270MB [Q4](#term-quantization) matrix — to get a draft token ID. This projection costs 1.3ms, not because the matrix multiply is slow, but because loading 270MB of weights is [bandwidth-limited](#term-memory-bandwidth).
+
+In the K=1 zero-replay loop, this 1.3ms LM head cost is paid during *drafting*, which happens every step. The verify pass also runs the LM head, but that's unavoidable — we need the full logits to check the draft and produce the bonus token. The draft LM head, however, only needs to identify the single most likely token from the MTP hidden state. We don't need 248K logits; we just need the argmax.
+
+The insight: the draft token almost always comes from a small set of likely candidates. If we know which ~1024 tokens are plausible (from the previous step's verify logits), we only need to project against those 1024 rows instead of all 248,320.
+
+### Why indexing into Q4 doesn't work
+
+The first attempt used MLX's gather to index into the quantized weight matrix: `W[top_k_indices]` to extract the relevant 1024 rows, then `mx.quantized_matmul` for the sub-matrix multiply. Profiling revealed that Q4 weight indexing alone costs 0.109ms — the gather must unpack 4-bit values from packed uint16 storage at scattered positions, which defeats memory coalescing. The "fast" sub-matrix multiply saved 1.18ms on the matmul but paid back 0.109ms on the gather, netting only 1.07ms.
+
+### Pre-dequantized f16: eliminating the gather
+
+The solution was to pre-dequantize the *entire* 248K × 2048 LM head from Q4 to [f16](https://en.wikipedia.org/wiki/Half-precision_floating-point_format) at initialization:
+
+```python
+self._lm_head_f16 = mx.dequantize(
+    head["weight"], head["scales"], head["biases"],
+    head.group_size, head.bits,
+)  # ~2GB, one-time cost
+```
+
+This costs ~2GB of memory (which fits comfortably in 48GB) and is done once at startup. The payoff: f16 weights are stored as a dense contiguous matrix, so `self._lm_head_f16[top_k_indices]` is a simple memory copy with no unpacking overhead.
+
+Each step now:
+
+1. Takes the top-1024 token indices from the previous verify logits (via `mx.argpartition`, ~0.01ms)
+2. Slices the f16 weight matrix: `sub_W = lm_head_f16[indices]` → a (1024, 2048) contiguous matrix
+3. Computes `mtp_hidden @ sub_W.T` — a tiny f16 matmul (~0.12ms) instead of the 270MB Q4 LM head (~1.3ms)
+
+The draft cost dropped from 1.3ms to ~0.13ms — a 10x reduction. Acceptance drops marginally from 82% to 80% because the draft is restricted to the top-1024 candidates from the *previous* step's logits. On rare tokens outside this set, the draft is always wrong — but the verify step catches it, and the 2% acceptance loss is more than compensated by the faster drafting.
+
 ## The Final Numbers
 
 The complete optimization stack, each layer building on the previous:
 
 | Optimization | tok/s | vs Baseline | Contribution |
 |---|---|---|---|
-| Baseline | 70.9 | 1.00x | -- |
-| + MTP K=1 batch verify | 80.7 | 1.14x | +14% |
-| + Fused MoE SIMD kernels | 84.4 | 1.19x | +5% |
-| + Zero-replay (split Metal) | **90.4** | **1.27x** | +8% |
+| Baseline | 73.1 | 1.00x | -- |
+| + MTP K=1 batch verify | 80.7 | 1.10x | +10% |
+| + Fused MoE SIMD kernels | 84.4 | 1.15x | +5% |
+| + Zero-replay (split Metal) | 90.4 | 1.24x | +9% |
+| + Capture kernel | 92.5 | 1.27x | +3% |
+| + Top-K f16 cached draft | **100.8** | **1.38x** | +11% |
 
-Per content type, the gains are consistent:
+Per content type:
 
-| Category | Baseline | Final (all_zr_k1) | Speedup |
+| Category | Baseline | Final (topk_1024) | Speedup |
 |---|---|---|---|
-| Code | 72.0 | 90.2 | 1.26x |
-| Prose | 70.1 | 85.5 | 1.22x |
-| Repetitive | 70.5 | 100.6 | 1.43x |
-| Q&A | 71.1 | 86.2 | 1.24x |
+| Code | 72.0 | 98.2 | 1.36x |
+| Prose | 70.1 | 97.8 | 1.40x |
+| Repetitive | 70.5 | 110.4 | 1.57x |
+| Q&A | 71.1 | 96.9 | 1.36x |
 
-K=2 and K=3 with zero-replay were also tested. The replay elimination makes K=2 genuinely viable now (1.18x vs the standard K=2's 0.95x — a dramatic swing), but K=1 still wins because the MTP head's accuracy degrades sharply at depth 2 (64% vs 79% acceptance). At K=3, acceptance drops to 37%. The head was trained to predict one token ahead from backbone hidden states. Chaining it for deeper speculation makes its predictions increasingly [out-of-distribution](#term-ood) — it's seeing its own outputs instead of the backbone's, and it was never trained for that.
+The top-K draft is especially effective on repetitive content, where the candidate set from the previous step almost always contains the next token. Even on the hardest category (Q&A, with more diverse token distributions), the speedup is 1.36x.
+
+K=2 and K=3 with zero-replay were also tested. The replay elimination makes K=2 genuinely viable (1.18x vs the standard K=2's 0.95x — a dramatic swing), but K=1 still wins because the MTP head's accuracy degrades sharply at depth 2 (64% vs 79% acceptance). At K=3, acceptance drops to 37%. The head was trained to predict one token ahead from backbone hidden states. Chaining it for deeper speculation makes its predictions increasingly [out-of-distribution](#term-ood) — it's seeing its own outputs instead of the backbone's, and it was never trained for that.
 
 | Config | tok/s | vs Base | Acceptance | Tok/Step |
 |---|---|---|---|---|
-| all_zr_k1 | **90.4** | **1.27x** | 79% | 1.80 |
-| all_zr_k2 | 83.0 | 1.18x | 64% | 2.30 |
-| all_zr_k3 | 60.6 | 0.86x | 37% | 2.11 |
+| all_zr_k1 | 97.3 | 1.33x | 82% | 1.83 |
+| topk_1024 | **100.8** | **1.38x** | 80% | 1.81 |
+| topk_1024_a95 (K=2 adaptive) | 95.5 | 1.31x | 78% | 1.95 |
 
 ## What This Means
 
-We moved from 28% to 34% of theoretical memory bandwidth utilization. The remaining 66% gap is Metal's internal scheduling overhead for 2,612 operations per decode step: [command buffer](#term-command-buffer) processing, memory barriers between dependent kernels, per-kernel compute encoder setup. This is intrinsic to the Metal runtime and not addressable from user code.
+We moved from 28% to 38% of theoretical memory bandwidth utilization. The remaining 62% gap is Metal's internal scheduling overhead for 2,612 operations per decode step: [command buffer](#term-command-buffer) processing, memory barriers between dependent kernels, per-kernel compute encoder setup. This is intrinsic to the Metal runtime and not addressable from user code.
 
 What would close more of the gap:
 
 - **Deeper kernel fusion in MLX** (fusing RMSNorm, Matmul, and Activation chains): would reduce 2,612 ops to ~200-300, dramatically cutting scheduling overhead. This is an MLX framework-level change.
 - **Metal megakernels**: running an entire transformer layer as one persistent kernel, avoiding per-op scheduling. Used by FlashInfer and TensorRT-LLM on CUDA, not yet feasible on Metal.
 - **M5 with Metal 4 TensorOps**: Apple's upcoming dedicated matrix multiply accelerator, estimated 20-27% decode improvement from increased effective bandwidth.
-- **Better MTP heads**: a 2-layer head trained with curriculum learning on its own outputs could sustain >80% acceptance at K=2, pushing tokens-per-step from 1.8 to ~2.3 and throughput past 100 t/s.
+- **Better MTP heads**: a 2-layer head trained with curriculum learning on its own outputs could sustain >80% acceptance at K=2, pushing tokens-per-step from 1.8 to ~2.3 and throughput well past 100 t/s.
 
-The approach generalizes beyond this specific model. Any hybrid attention-recurrent architecture — Jamba, Zamba, future Mamba-attention hybrids — will face the same replay tax on speculative decoding rejection. The split-kernel intermediate capture technique applies directly to any architecture where the recurrent update can be decomposed into per-token calls, which is true by definition for any sequential recurrence.
+The approach generalizes beyond this specific model. Any hybrid attention-recurrent architecture — Jamba, Zamba, future Mamba-attention hybrids — will face the same replay tax on speculative decoding rejection. The capture kernel technique applies directly to any architecture where the recurrent update can be decomposed into per-token calls, which is true by definition for any sequential recurrence.
 
-The broader lesson is about where optimization leverage exists on memory-bandwidth-bound hardware. Anything that doesn't reduce weight-loading volume or increase tokens-per-load is wasted effort. Layer skipping, early exit, graph compilation, model distillation for drafting — they all fail because they don't touch the dominant cost. Speculative decoding works because it amortizes weight loads across multiple accepted tokens. Custom SIMD kernels work because they reduce intermediate memory round-trips. And zero-replay works because it eliminates a redundant weight load that only existed because the software couldn't capture a value the hardware had already computed.
+The broader lesson is about where optimization leverage exists on memory-bandwidth-bound hardware. Anything that doesn't reduce weight-loading volume or increase tokens-per-load is wasted effort. Layer skipping, early exit, graph compilation, Cython inner loops, model distillation for drafting — they all fail because they don't touch the dominant cost. Speculative decoding works because it amortizes weight loads across multiple accepted tokens. Custom SIMD kernels work because they reduce intermediate memory round-trips. Zero-replay works because it eliminates a redundant weight load that only existed because the software couldn't capture a value the hardware had already computed. And the top-K cached draft works because it replaces a 270MB weight load with a 4MB one — reducing the dominant cost of an operation that runs every step.
 
 Sometimes the best optimization is noticing that the answer already exists inside a computation you're about to throw away.
 
@@ -366,3 +436,5 @@ Sometimes the best optimization is noticing that the answer already exists insid
 <span id="term-fp-nonassoc">**Floating-Point Non-Associativity**</span>: The mathematical property that `(a + b) + c` does not always equal `a + (b + c)` in floating-point arithmetic due to rounding. This means GPU operations that accumulate results in different orders (e.g., different GEMM tiling for batch-of-2 vs two batch-of-1) can produce slightly different results. Both are "correct" — they're just different valid roundings of the same mathematical operation.
 
 <span id="term-ood">**Out-of-Distribution (OOD)**</span>: When a model receives inputs that differ from its training data. The MTP head was trained on the backbone model's hidden states but during multi-step speculation (K>1), it receives its own outputs as input — something it never saw during training. This distribution shift causes accuracy to degrade with each additional speculative step.
+
+<span id="term-top-k-draft">**Top-K Cached Draft**</span>: A technique to reduce the cost of speculative draft token generation. Instead of projecting the MTP hidden state through the full vocabulary LM head (248K output dimensions, ~270MB of weights), only project against the top-K most likely tokens from the previous step's verify logits. The weight sub-matrix is pre-sliced from a dequantized f16 copy of the LM head, making the matmul ~10x cheaper at the cost of a small accuracy reduction (the draft can only predict tokens in the cached candidate set).

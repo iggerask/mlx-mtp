@@ -4,10 +4,10 @@ GDN intermediate state capture for zero-replay rejection.
 During a multi-token batch verify (e.g., [token_0, draft1]), the GDN recurrence
 processes token_0 then draft1 sequentially. Normally only the final state is saved.
 
-This module patches gated_delta_update to SPLIT multi-token batches into individual
-single-token Metal kernel calls, saving intermediate recurrent states between them.
-This produces bit-identical results to the batch kernel (same operations, same order)
-while capturing the intermediate states needed for zero-cost rejection.
+This module uses a custom Metal kernel that outputs intermediate recurrent states
+alongside the normal output, eliminating the need to split multi-token batches
+into individual kernel calls. This saves ~30 extra kernel dispatches per step
+(~0.9ms on M4 Pro) compared to the split approach.
 
 Also saves/restores conv sliding window state for exact cache restoration.
 
@@ -32,45 +32,31 @@ from mlx_lm.models.cache import KVCache, ArraysCache
 
 # Global state for capture (set during verify forward)
 _capture_enabled = False
-# List[List[mx.array]] — _intermediates[layer_idx][position] = recurrent state
-_intermediates: List[List[mx.array]] = []
+# List[mx.array] — _intermediates[layer_idx] = (B, T-1, Hv, Dv, Dk) tensor
+_intermediates: List[mx.array] = []
 
 # Store original function for unpatching
 _original_gated_delta_update = None
 
 
-def _split_gated_delta_update(q, k, v, a, b, A_log, dt_bias,
-                               state=None, mask=None, use_kernel=True):
-    """Split multi-token batch into individual Metal kernel calls.
+def _capture_gated_delta_update(q, k, v, a, b, A_log, dt_bias,
+                                state=None, mask=None, use_kernel=True):
+    """Gated delta update that captures intermediate states via custom kernel.
 
-    For T>1 with capture enabled: processes each token separately through the
-    ORIGINAL gated_delta_update (which uses the Metal kernel), saving the
-    recurrent state after each token except the last.
+    For T>1 with capture enabled: uses the capture kernel variant that outputs
+    both the normal result and intermediate recurrent states in a single dispatch.
 
     For T=1 or capture disabled: passes through to the original function unchanged.
     """
     B, T, *_ = q.shape
 
     if _capture_enabled and T > 1:
-        layer_states = []
-        ys = []
-
-        for t in range(T):
-            y_t, state = _original_gated_delta_update(
-                q[:, t:t+1], k[:, t:t+1], v[:, t:t+1],
-                a[:, t:t+1], b[:, t:t+1],
-                A_log, dt_bias, state,
-                mask[:, t:t+1] if mask is not None else None,
-                use_kernel=use_kernel,
-            )
-            ys.append(y_t)
-            if t < T - 1:
-                # Save state after this token (intermediate for rejection)
-                layer_states.append(mx.array(state))
-
-        _intermediates.append(layer_states)
-        y = mx.concatenate(ys, axis=1)
-        return y, state
+        from .gdn_kernel import gated_delta_update_with_capture
+        y, final_state, intermediates = gated_delta_update_with_capture(
+            q, k, v, a, b, A_log, dt_bias, state, mask
+        )
+        _intermediates.append(intermediates)
+        return y, final_state
     else:
         return _original_gated_delta_update(
             q, k, v, a, b, A_log, dt_bias, state, mask, use_kernel,
@@ -80,8 +66,9 @@ def _split_gated_delta_update(q, k, v, a, b, A_log, dt_bias,
 class GDNStateCapture:
     """Manages GDN intermediate state capture for zero-replay rejection.
 
-    Splits multi-token GDN batch processing into individual Metal kernel calls,
-    capturing intermediate recurrent states. Also saves/restores conv state.
+    Uses a custom Metal kernel that captures intermediate recurrent states
+    during multi-token processing. This avoids splitting the batch into
+    individual kernel calls, saving ~30 dispatches per decode step.
     """
 
     def __init__(self, model):
@@ -98,8 +85,8 @@ class GDNStateCapture:
         import mlx_lm.models.gated_delta as gd_module
         import mlx_lm.models.qwen3_5 as q35_module
         _original_gated_delta_update = gd_module.gated_delta_update
-        gd_module.gated_delta_update = _split_gated_delta_update
-        q35_module.gated_delta_update = _split_gated_delta_update
+        gd_module.gated_delta_update = _capture_gated_delta_update
+        q35_module.gated_delta_update = _capture_gated_delta_update
         self._patched = True
 
     def unpatch(self):
@@ -123,19 +110,19 @@ class GDNStateCapture:
         _capture_enabled = True
         _intermediates = []
 
-        # Save pre-verify conv states (cache[0]) for each GDN layer
+        # Save pre-verify conv states (cache[0]) for each GDN layer.
+        # Uses mx.array() to snapshot current graph node — lazy eval preserves
+        # the correct pre-forward value even though the forward will overwrite cache.
         self._saved_conv = []
-        copies = []
+        self._conv_copies = []  # kept alive for eval in main graph
         for c in cache:
             if isinstance(c, ArraysCache):
                 if c.cache[0] is not None:
                     copy = mx.array(c.cache[0])
                     self._saved_conv.append(copy)
-                    copies.append(copy)
+                    self._conv_copies.append(copy)
                 else:
                     self._saved_conv.append(None)
-        if copies:
-            mx.eval(*copies)
 
     def disable(self):
         """Disable intermediate state capture."""
@@ -143,10 +130,12 @@ class GDNStateCapture:
         _capture_enabled = False
 
     def get_intermediates(self) -> List[mx.array]:
-        """Get all captured intermediate arrays for mx.eval()."""
-        flat = []
-        for layer_states in _intermediates:
-            flat.extend(layer_states)
+        """Get all captured intermediate arrays for mx.eval().
+
+        Includes conv state copies that were snapshotted before verify forward.
+        """
+        flat = list(self._conv_copies)
+        flat.extend(_intermediates)
         return flat
 
     def has_intermediates(self) -> bool:
@@ -186,11 +175,11 @@ class GDNStateCapture:
             if isinstance(c, KVCache):
                 c.offset = max(0, c.offset - n_kv_trim)
             elif isinstance(c, ArraysCache):
-                # Restore recurrent state
+                # Restore recurrent state from captured intermediates
                 if gdn_idx < len(_intermediates):
-                    layer_states = _intermediates[gdn_idx]
-                    if position < len(layer_states):
-                        c.cache[1] = layer_states[position]
+                    im = _intermediates[gdn_idx]  # (B, T-1, Hv, Dv, Dk)
+                    if position < im.shape[1]:
+                        c.cache[1] = im[:, position]
 
                 # Restore conv state
                 if gdn_idx < len(self._saved_conv) and self._saved_conv[gdn_idx] is not None:
